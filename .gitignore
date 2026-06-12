@@ -1,0 +1,11 @@
+PROJECT_BRAINSTORMING_TEMPLATE.md 
+REPOSITORY_REVIEW_REPORT.md
+resources/
+todo
+.env
+backend/.env
+.vscode
+.github
+.DS_Store
+GO_MONOLITH_IMPLEMENTATION_NOTES.md
+backend/data/.home-cache.json
