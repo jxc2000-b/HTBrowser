@@ -4,6 +4,7 @@ resources/
 todo
 .env
 backend/.env
+backend/data/
 .vscode
 .github
 .DS_Store
