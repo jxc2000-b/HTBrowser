@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"health-dash/pkg/internal/llm"
 	"health-dash/pkg/internal/prompts"
@@ -68,6 +69,7 @@ func (h Handler) validate(w http.ResponseWriter, r *http.Request) {
 
 	docNumbers := numberTokens(markdown)
 	docLower := strings.ToLower(markdown)
+	docUnits := normalizeUnit(markdown)
 	lines := strings.Split(markdown, "\n")
 
 	results := make([]ClaimResult, len(claims))
@@ -96,31 +98,44 @@ func (h Handler) validate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Layer 3: machine-check the citations. A "match" only stands if the
-	// cited line actually contains the claimed value.
+	// Layer 3: machine-check the citations. The LLM's job is the semantic
+	// judgment (is this value used in the right context); the machine confirms
+	// the value really sits on a real line. We do not fail a claim just because
+	// the LLM cited the wrong line number — if the value is locatable on any
+	// line we accept it and correct the citation. The unique thing the LLM
+	// guards is a "no_match" verdict (right number, wrong metric/date).
 	for i := range results {
 		verdict, ok := verdicts[results[i].ID]
 		if !ok {
 			continue // gate-failed or missing from LLM output; stays no_match
 		}
-		results[i].Line = verdict.Line
 		results[i].Note = verdict.Note
 		if verdict.Verdict != "match" {
 			results[i].Verdict = "no_match"
 			continue
 		}
-		if verdict.Line < 1 || verdict.Line > len(lines) {
-			results[i].Verdict = "citation_mismatch"
-			results[i].Note = "cited line does not exist"
+
+		// Hallucinated unit: claimed an alphabetic unit the document never uses
+		// anywhere (e.g. inventing mg/dL where the source has none). Symbol-only
+		// units like "%" are skipped here — they are often implied by the source
+		// ("…_pct") and left to the LLM's semantic unit judgment.
+		if unit := normalizeUnit(results[i].Unit); unit != "" && hasLetter(unit) && !strings.Contains(docUnits, unit) {
+			results[i].Verdict = "no_match"
+			results[i].Line = 0
+			results[i].Note = fmt.Sprintf("unit %q does not appear anywhere in the document", results[i].Unit)
 			continue
 		}
-		cited := lines[verdict.Line-1]
-		if !valuePresent(results[i].Value, numberTokens(cited), strings.ToLower(cited)) {
+
+		line := locateValueLine(results[i].Claim, lines, verdict.Line)
+		if line == 0 {
 			results[i].Verdict = "citation_mismatch"
-			results[i].Note = fmt.Sprintf("cited line %d does not contain the value", verdict.Line)
+			results[i].Line = 0
+			results[i].Note = "value could not be located on any line of the document"
 			continue
 		}
+		results[i].Line = line
 		results[i].Verdict = "match"
+		results[i].Note = ""
 	}
 
 	status := "verified"
@@ -191,9 +206,12 @@ var (
 	// Matches data-chart='...' or data-chart="..." in document order so
 	// ChartIndex lines up with the DOM's canvas[data-chart] order.
 	canvasChartPattern = regexp.MustCompile(`(?i)<canvas\b[^>]*\bdata-chart\s*=\s*(?:'([^']*)'|"([^"]*)")`)
-	numberPattern      = regexp.MustCompile(`-?(?:\d[\d,]*(?:\.\d+)?|\.\d+)`)
+	// No leading minus: a hyphen between digits is a range separator ("9-23"
+	// means 9 and 23), not a negative sign. Health values are not negative.
+	numberPattern = regexp.MustCompile(`\d[\d,]*(?:\.\d+)?|\.\d+`)
 	// Models sometimes emit ".9" instead of "0.9", which is invalid JSON.
 	bareDecimalPattern = regexp.MustCompile(`([\[,:\s])\.(\d)`)
+	wordNumberPattern  = regexp.MustCompile(`(?i)[a-z]+(?:[ -]+(?:and[ -]+)?[a-z]+)*`)
 )
 
 type chartSpec struct {
@@ -332,6 +350,47 @@ func valuePresent(value string, textNumbers []float64, textLower string) bool {
 	return true
 }
 
+// locateValueLine finds the best line containing the claim's value, preferring
+// lines that also carry the claim's date/label context. hint is the LLM's cited
+// line, used only as a tie-breaker. Returns 0 if no line contains the value.
+func locateValueLine(claim Claim, lines []string, hint int) int {
+	best, bestScore := 0, -1
+	for i, line := range lines {
+		if !valuePresent(claim.Value, numberTokens(line), strings.ToLower(line)) {
+			continue
+		}
+		score := 0
+		lower := strings.ToLower(line)
+		if claim.Date != "" && strings.Contains(lower, strings.ToLower(claim.Date)) {
+			score += 2
+		}
+		if claim.Label != "" {
+			for _, word := range strings.Fields(strings.ToLower(claim.Label)) {
+				if len(word) > 2 && strings.Contains(lower, word) {
+					score++
+				}
+			}
+		}
+		if i+1 == hint {
+			score++ // agree with the LLM when otherwise tied
+		}
+		if score > bestScore {
+			best, bestScore = i+1, score
+		}
+	}
+	return best
+}
+
+// normalizeUnit lowercases and strips whitespace so unit strings compare
+// independent of spacing ("mg/dL" vs "mg / dl").
+func normalizeUnit(unit string) string {
+	return strings.ToLower(strings.Join(strings.Fields(unit), ""))
+}
+
+func hasLetter(s string) bool {
+	return strings.IndexFunc(s, unicode.IsLetter) >= 0
+}
+
 func numberTokens(text string) []float64 {
 	var numbers []float64
 	for _, token := range numberPattern.FindAllString(text, -1) {
@@ -340,7 +399,90 @@ func numberTokens(text string) []float64 {
 			numbers = append(numbers, value)
 		}
 	}
-	return numbers
+	// Also surface numbers the document spells out in words ("twenty-eight"),
+	// so a digit claim (28) can be verified against a worded source.
+	return append(numbers, spelledNumbers(text)...)
+}
+
+var numberWords = map[string]int{
+	"zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+	"six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11,
+	"twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16,
+	"seventeen": 17, "eighteen": 18, "nineteen": 19, "twenty": 20, "thirty": 30,
+	"forty": 40, "fifty": 50, "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90,
+}
+
+var tensWords = []string{"twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"}
+
+// spelledNumbers extracts numbers written as words. It handles standard forms
+// ("eighty-four" → 84, "one hundred and eighty" → 180) and the concatenated
+// form some sources use ("twentyeight" → 28). It is intentionally bounded to
+// values under a few thousand — enough for health figures, not a full parser.
+func spelledNumbers(text string) []float64 {
+	var results []float64
+	for _, phrase := range wordNumberPattern.FindAllString(strings.ToLower(text), -1) {
+		fields := strings.FieldsFunc(phrase, func(r rune) bool { return r == ' ' || r == '-' })
+
+		var tokens []string
+		for _, field := range fields {
+			if field == "and" || field == "" {
+				continue
+			}
+			tokens = append(tokens, splitConcatenated(field)...)
+		}
+
+		current, total := 0, 0
+		any, sawScale := false, false
+		flush := func() {
+			if any && (sawScale || total+current > 0) {
+				results = append(results, float64(total+current))
+			}
+			current, total, any, sawScale = 0, 0, false, false
+		}
+		for _, token := range tokens {
+			switch {
+			case token == "hundred":
+				if current == 0 {
+					current = 1
+				}
+				current *= 100
+				any, sawScale = true, true
+			case token == "thousand":
+				if current == 0 {
+					current = 1
+				}
+				total += current * 1000
+				current = 0
+				any, sawScale = true, true
+			default:
+				if value, ok := numberWords[token]; ok {
+					current += value
+					any = true
+				} else {
+					flush()
+				}
+			}
+		}
+		flush()
+	}
+	return results
+}
+
+// splitConcatenated splits a glued tens+ones word like "twentyeight" into
+// ["twenty", "eight"]; otherwise returns the word unchanged.
+func splitConcatenated(word string) []string {
+	if _, ok := numberWords[word]; ok {
+		return []string{word}
+	}
+	for _, tens := range tensWords {
+		if strings.HasPrefix(word, tens) {
+			rest := word[len(tens):]
+			if value, ok := numberWords[rest]; ok && value < 10 {
+				return []string{tens, rest}
+			}
+		}
+	}
+	return []string{word}
 }
 
 func writeJSON(w http.ResponseWriter, payload any) {

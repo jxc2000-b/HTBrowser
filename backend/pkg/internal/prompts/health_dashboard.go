@@ -29,7 +29,7 @@ Return a full HTML document with a <head> and a <body>:
 </html>
 
 Keep the <head> minimal — just the <title>, <meta name="color-scheme">, and a Google Fonts <link>. Tailwind CSS and scripts are injected automatically.
-Set color-scheme to "light" or "dark" — choose whichever suits the page. Use only one.
+ALWAYS use a light color scheme: set <meta name="color-scheme" content="light"> and design the page for a light background. Never use a dark theme.
 
 STYLING:
 Use Tailwind CSS utility classes for all styling. Create a rich, polished, technical-feeling dashboard.
@@ -57,6 +57,7 @@ Generate the dashboard page for ONE health document. The complete markdown sourc
 DATA RULES (critical):
 - Every health data value you display (numbers, dates, ranges, scores) MUST come verbatim from the document. Never estimate, extrapolate, average, convert units, or invent values.
 - Copy values character-for-character as the document formats them: 5.10 stays 5.10 (not 5.1), 0.9 stays 0.9 (not .9).
+- ALWAYS display numbers as digits, never as words. Write "180", never "one hundred and eighty"; write "84", never "eighty-four". If the document itself spells a number out in words, convert it to digits for display (e.g. the document says "twenty-eight ng/ml" → display 28).
 - Wrap EVERY displayed health value in a claim span:
     <span data-value="4.2" data-label="TSH" data-unit="mIU/L" data-date="2026-03-01">4.2</span>
   data-value is the bare value, data-label names the metric as the document names it, data-unit and data-date are included when the document provides them. The visible text must equal data-value (plus the unit if you show it inline).
@@ -71,6 +72,8 @@ Where the document contains a time series or comparable values, include charts. 
 - "type" is one of: line, bar, doughnut.
 - "labels" and "values" must come verbatim from the document and stay in document order.
 - Each chart plots exactly ONE metric series: "values" is a flat array of numbers. Use a separate chart per metric; never nest arrays.
+- ONLY plot values that belong to the same metric measured in the same unit over time (e.g. TSH across several dates). NEVER combine different, unrelated metrics into one chart — do not put HbA1c, ferritin, and vitamin D (or cholesterol and glucose, etc.) together on a single chart, even as a "summary". Different metrics with different units are not comparable and such a chart is meaningless. If a metric has only one reading, show it as a stat, not a chart.
+- A bar chart comparing related components measured in the SAME unit (e.g. total cholesterol vs LDL vs HDL, all mg/dL) is acceptable; mixing units is not.
 - Write valid JSON numbers with leading zeros (0.9, never .9). Keep the document's formatting: if the document says 5.10, write 5.10, not 5.1.
 - Always wrap the canvas in a div with a Tailwind height class (e.g. h-64).
 - Include 1-3 charts when the data supports them.
@@ -79,7 +82,12 @@ CONTENT:
 Build a rich page: headline stats, charts, a detailed table of readings, and a "visualization notes" section. Show the source document name. Link back to home.
 
 VISUALIZATION NOTES:
-The notes section must briefly define each variable being measured on the page: what the metric is and what it measures in the body, in one or two plain-language sentences each (e.g. "TSH (thyroid stimulating hormone) is produced by the pituitary gland and signals the thyroid to make hormones; it is commonly used to screen thyroid function."). These are general educational definitions, not interpretations of the user's results. Do not introduce any numeric thresholds or targets in the definitions unless they appear in the document (wrapped in claim spans like any other value).`
+The notes section must ONLY define what each variable on the page measures — a neutral, textbook definition of the test or quantity itself, in one or two plain-language sentences each (e.g. "TSH (thyroid stimulating hormone) is a hormone produced by the pituitary gland; the TSH blood test measures its concentration and is commonly used to assess thyroid function.").
+STRICTLY FORBIDDEN in these notes:
+- Any statement about what the user's specific values mean, whether they are high/low/normal/good/bad, or how they have changed.
+- Any health impact, risk, consequence, cause, or implication of the measurement (e.g. do NOT say "high LDL increases heart disease risk").
+- Any advice, recommendation, target, or threshold.
+Define only what the thing IS and what is being measured — nothing about its effect on health or the meaning of the results. Do not introduce any numbers in the notes.`
 
 const validatorSystemPrompt = `You are a strict data validator for a health dashboard. You verify that values displayed on a generated page exist in a source markdown document.
 
@@ -87,7 +95,7 @@ You are given:
 1. The source document with line numbers, formatted as "N| content".
 2. A JSON array of claims extracted from the rendered page: {"id", "value", "label", "unit", "date"}.
 
-For each claim, find the line in the document that contains that exact value used in that context (matching label/date where given).
+For each claim, find the line in the document that contains that exact value used in that context (matching label/date where given), and confirm the unit is correct.
 
 Respond with ONLY a JSON array, no prose, no markdown fences:
 [{"id": 0, "line": 12, "verdict": "match"}, {"id": 1, "line": 0, "verdict": "no_match", "note": "value not in document"}]
@@ -95,8 +103,11 @@ Respond with ONLY a JSON array, no prose, no markdown fences:
 Rules:
 - "match" requires the value to appear on the cited line. Cite the single most relevant line number.
 - If the value appears nowhere, or only in a different context (wrong metric, wrong date), the verdict is "no_match" with line 0 and a brief note.
-- Be strict: a rounded, converted, or computed value that does not appear in the document is "no_match".
-- Pure formatting differences are NOT mismatches: 5.10 in the document matches a claim of 5.1, and 0.9 matches .9 — the number is identical. Only genuine rounding or changed digits (3.93 vs 3.9) fail.
+- Be strict about VALUES: a rounded, converted, or computed value that does not appear in the document is "no_match".
+- UNITS: if the claim's unit contradicts the unit the document gives for that value (e.g. claim says mg/dL but the document says mmol/L, or the document gives no unit and the claim invents one), the verdict is "no_match" with a note naming the unit problem.
+- Pure formatting differences are NOT mismatches: 5.10 matches a claim of 5.1, and 0.9 matches .9 — the number is identical. Only genuine rounding or changed digits (3.93 vs 3.9) fail.
+- Numbers written as WORDS in the document equal the same number as digits: "twenty-eight" (or "twentyeight") matches a claim of 28, "eighty-four" matches 84, "one hundred and eighty" matches 180. Treat them as identical.
+- A range written as "9-23", "(9 - 23)", or "0.35 - 4.94" CONTAINS both endpoints: a claim of 23 matches the line "BUN/CREAT RATIO 15 (9-23)", and a claim of 9 matches it too.
 - Never invent line numbers.`
 
 // HomeMessages builds the prompt pair for the homepage.
