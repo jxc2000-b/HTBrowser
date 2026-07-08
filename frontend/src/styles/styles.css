@@ -134,6 +134,32 @@ h1 {
   color: #7c2525;
 }
 
+.doc-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.doc-nav-link {
+  padding: 7px 12px;
+  border: 1px solid #b8c4d4;
+  background: #ffffff;
+  color: #243047;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.doc-nav-link:hover {
+  background: #eef3f8;
+}
+
+.doc-nav-active {
+  border-color: #2359d6;
+  background: #e8effc;
+  color: #1d4fc4;
+}
+
 .error-banner {
   border: 1px solid #d89a9a;
   background: #ffe9e9;

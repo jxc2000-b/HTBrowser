@@ -28,9 +28,9 @@ func main() {
 
 	mux := http.NewServeMux()
 	api := httpapi.Handler{
-		LLM:       llmClient,
-		Docs:      docs.NewRegistry(cfg.DataDir),
-		HomeCache: httpapi.NewHomeCache(filepath.Join(cfg.DataDir, ".home-cache.json")),
+		LLM:   llmClient,
+		Docs:  docs.NewRegistry(cfg.DataDir),
+		Cache: httpapi.NewPageCache(filepath.Join(cfg.DataDir, ".page-cache.json")),
 	}
 	api.Register(mux)
 

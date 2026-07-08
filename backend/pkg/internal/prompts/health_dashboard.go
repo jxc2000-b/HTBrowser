@@ -19,7 +19,7 @@ Return a full HTML document with a <head> and a <body>:
 
 <html>
 <head>
-  <title>HealthDash - Page Name</title>
+  <title>HTBROWSER - Page Name (no subtitle yet)</title>
   <meta name="color-scheme" content="light">
   <link href="https://fonts.googleapis.com/css2?family=ChosenFont:wght@400;500;600;700&display=swap" rel="stylesheet">
 </head>

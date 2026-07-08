@@ -39,7 +39,7 @@ type Claim struct {
 type ClaimResult struct {
 	Claim
 	Line    int    `json:"line"`
-	Verdict string `json:"verdict"` // "match", "no_match", "citation_mismatch"
+	Verdict string `json:"verdict"` // "match", "no_match", "citation_mismatch", "unverified"
 	Note    string `json:"note,omitempty"`
 }
 
@@ -90,11 +90,26 @@ func (h Handler) validate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Layer 2: LLM binds each surviving claim to a source line.
+	// Layer 2: LLM binds each surviving claim to a source line. A validator
+	// outage must not take down an otherwise-rendered page: retry once, then
+	// degrade to "unverified" (dashed, not flagged red) for the claims that
+	// passed the deterministic gate.
 	verdicts, err := h.runValidatorLLM(r, markdown, llmClaims)
 	if err != nil {
-		log.Printf("validator LLM failed: %v", err)
-		http.Error(w, "validator failed: "+err.Error(), http.StatusBadGateway)
+		log.Printf("validator LLM failed (retrying): %v", err)
+		verdicts, err = h.runValidatorLLM(r, markdown, llmClaims)
+	}
+	if err != nil {
+		log.Printf("validator LLM failed twice, degrading to unverified: %v", err)
+		for _, claim := range llmClaims {
+			for i := range results {
+				if results[i].ID == claim.ID {
+					results[i].Verdict = "unverified"
+					results[i].Note = "validator unavailable; value passed the presence check but was not verified in context"
+				}
+			}
+		}
+		writeJSON(w, validateResponse{Status: "partial", Claims: results})
 		return
 	}
 
@@ -119,7 +134,7 @@ func (h Handler) validate(w http.ResponseWriter, r *http.Request) {
 		// anywhere (e.g. inventing mg/dL where the source has none). Symbol-only
 		// units like "%" are skipped here — they are often implied by the source
 		// ("…_pct") and left to the LLM's semantic unit judgment.
-		if unit := normalizeUnit(results[i].Unit); unit != "" && hasLetter(unit) && !strings.Contains(docUnits, unit) {
+		if unit := normalizeUnit(results[i].Unit); unit != "" && hasLetter(unit) && !containsUnit(docUnits, unit) {
 			results[i].Verdict = "no_match"
 			results[i].Line = 0
 			results[i].Note = fmt.Sprintf("unit %q does not appear anywhere in the document", results[i].Unit)
@@ -202,7 +217,10 @@ func parseVerdicts(response string) ([]llmVerdict, error) {
 }
 
 var (
-	spanClaimPattern = regexp.MustCompile(`(?i)<span\b[^>]*\bdata-value\s*=\s*"[^"]*"[^>]*>`)
+	// Both quote styles are accepted so the extracted claims stay index-aligned
+	// with the frontend's querySelectorAll('span[data-value]'), which matches
+	// single-quoted attributes too.
+	spanClaimPattern = regexp.MustCompile(`(?i)<span\b[^>]*\bdata-value\s*=\s*(?:"[^"]*"|'[^']*')[^>]*>`)
 	// Matches data-chart='...' or data-chart="..." in document order so
 	// ChartIndex lines up with the DOM's canvas[data-chart] order.
 	canvasChartPattern = regexp.MustCompile(`(?i)<canvas\b[^>]*\bdata-chart\s*=\s*(?:'([^']*)'|"([^"]*)")`)
@@ -320,9 +338,13 @@ func parseChartSpec(rawJSON string) (chartSpec, []chartValue, error) {
 }
 
 func attrValue(tag, name string) string {
-	pattern := regexp.MustCompile(`(?i)\b` + regexp.QuoteMeta(name) + `\s*=\s*"([^"]*)"`)
+	pattern := regexp.MustCompile(`(?i)\b` + regexp.QuoteMeta(name) + `\s*=\s*(?:"([^"]*)"|'([^']*)')`)
 	if match := pattern.FindStringSubmatch(tag); match != nil {
-		return html.UnescapeString(match[1])
+		value := match[1]
+		if value == "" {
+			value = match[2]
+		}
+		return html.UnescapeString(value)
 	}
 	return ""
 }
@@ -385,6 +407,31 @@ func locateValueLine(claim Claim, lines []string, hint int) int {
 // independent of spacing ("mg/dL" vs "mg / dl").
 func normalizeUnit(unit string) string {
 	return strings.ToLower(strings.Join(strings.Fields(unit), ""))
+}
+
+// containsUnit reports whether unit occurs in the normalized document text at
+// a letter boundary. Because normalization strips whitespace, a plain
+// substring search can match across word seams (unit "gm" inside "…mg ml…" →
+// "mgml"); requiring non-letter neighbours prevents that.
+func containsUnit(docUnits, unit string) bool {
+	for from := 0; ; {
+		i := strings.Index(docUnits[from:], unit)
+		if i == -1 {
+			return false
+		}
+		i += from
+		beforeOK := i == 0 || !isLetterByte(docUnits[i-1])
+		after := i + len(unit)
+		afterOK := after == len(docUnits) || !isLetterByte(docUnits[after])
+		if beforeOK && afterOK {
+			return true
+		}
+		from = i + 1
+	}
+}
+
+func isLetterByte(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || b >= 0x80
 }
 
 func hasLetter(s string) bool {

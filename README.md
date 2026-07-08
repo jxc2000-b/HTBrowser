@@ -8,12 +8,12 @@ Simply enter you data in markdown format and store in a /data directory or use t
 To run: 
 ```
 cd backend
-DATA_DIR=test-data go run ./pkg/cmd/server
-```
+`DATA_DIR=test-data go run ./pkg/cmd/server
+````
 
 In another shell 
 ```
-cd frontend
+cd frontend`
 pnpm run dev
 ```
 ## What about hallucination? 

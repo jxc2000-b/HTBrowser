@@ -109,6 +109,7 @@ const SHELL_HTML = `<!DOCTYPE html>
         const spans = document.querySelectorAll('span[data-value]');
         const canvases = document.querySelectorAll('canvas[data-chart]');
         const failedCharts = {};
+        const unverifiedCharts = {};
 
         (payload.claims || []).forEach(claim => {
           if (claim.kind === 'span') {
@@ -117,10 +118,15 @@ const SHELL_HTML = `<!DOCTYPE html>
             if (claim.verdict === 'match') {
               el.classList.add('hd-verified');
               el.title = 'Verified · ' + payload.docName + '.md, line ' + claim.line;
+            } else if (claim.verdict === 'unverified') {
+              // Validator was unavailable: leave the dashed pending style.
+              el.title = 'Unverified · ' + (claim.note || 'validator unavailable');
             } else {
               el.classList.add('hd-failed');
               el.title = 'UNVERIFIED · ' + (claim.note || 'not found in ' + payload.docName + '.md');
             }
+          } else if (claim.kind === 'chart' && claim.verdict === 'unverified') {
+            if (failedCharts[claim.chartIndex] === undefined) unverifiedCharts[claim.chartIndex] = true;
           } else if (claim.kind === 'chart' && claim.verdict !== 'match') {
             failedCharts[claim.chartIndex] = claim.note || 'chart value not found in source';
           }
@@ -131,6 +137,8 @@ const SHELL_HTML = `<!DOCTYPE html>
           if (failedCharts[i] !== undefined) {
             wrapper.classList.add('hd-chart-failed');
             wrapper.title = 'UNVERIFIED chart data · ' + failedCharts[i];
+          } else if (unverifiedCharts[i]) {
+            wrapper.title = 'Unverified chart · validator unavailable';
           } else {
             wrapper.classList.add('hd-chart-verified');
           }
@@ -139,10 +147,32 @@ const SHELL_HTML = `<!DOCTYPE html>
         document.body.classList.add('hd-validated');
       }
 
+      // innerHTML does not execute <script> tags, but it DOES execute inline
+      // event handlers (onerror, onclick, ...) and javascript: URLs — and the
+      // CSP's 'unsafe-inline' would allow them. Strip both so model output
+      // stays declarative, as the "no scripts" contract intends.
+      function sanitizeHtml(html) {
+        const template = document.createElement('template');
+        template.innerHTML = html;
+        template.content.querySelectorAll('script').forEach(el => el.remove());
+        template.content.querySelectorAll('*').forEach(el => {
+          for (const attr of Array.from(el.attributes)) {
+            const name = attr.name.toLowerCase();
+            if (name.startsWith('on')) {
+              el.removeAttribute(attr.name);
+            } else if ((name === 'href' || name === 'src' || name === 'xlink:href')
+                && attr.value.replace(/[\\s\\u0000-\\u001f]/g, '').toLowerCase().startsWith('javascript:')) {
+              el.removeAttribute(attr.name);
+            }
+          }
+        });
+        return template.innerHTML;
+      }
+
       // Receive updates from the parent
       window.addEventListener('message', (e) => {
         if (e.data?.type === 'CONTENT_UPDATE') {
-          document.body.innerHTML = e.data.html;
+          document.body.innerHTML = sanitizeHtml(e.data.html);
           document.body.className = 'min-h-screen ' + (e.data.bodyClasses || '');
           document.body.setAttribute('style', e.data.bodyStyle || '');
           document.documentElement.style.colorScheme = e.data.colorScheme || 'light';

@@ -28,9 +28,25 @@ export type ClaimResult = {
   unit?: string;
   date?: string;
   line: number;
-  verdict: 'match' | 'no_match' | 'citation_mismatch';
+  /** 'unverified' = validator LLM was unavailable; value passed the presence gate but was not context-checked. */
+  verdict: 'match' | 'no_match' | 'citation_mismatch' | 'unverified';
   note?: string;
 };
+
+export type DocInfo = {
+  id: string;
+  title: string;
+  summary: string;
+};
+
+/** Fetches the document registry directly — no LLM round trip — for instant navigation. */
+export async function fetchDocs(): Promise<DocInfo[]> {
+  const response = await fetch('/api/docs');
+  if (!response.ok) {
+    throw new Error(`Document list request failed (${response.status}).`);
+  }
+  return (await response.json()) as DocInfo[];
+}
 
 export type ValidationResult = {
   status: 'verified' | 'partial' | 'no_claims';

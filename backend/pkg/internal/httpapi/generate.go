@@ -12,15 +12,30 @@ import (
 )
 
 type Handler struct {
-	LLM       *llm.Client
-	Docs      docs.Registry
-	HomeCache *HomeCache
+	LLM   *llm.Client
+	Docs  docs.Registry
+	Cache *PageCache
 }
 
 func (h Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/health", h.health)
+	mux.HandleFunc("GET /api/docs", h.listDocs)
 	mux.HandleFunc("POST /api/generate", h.generate)
 	mux.HandleFunc("POST /api/validate", h.validate)
+}
+
+// listDocs returns the document registry as plain JSON so the frontend can
+// render navigation instantly, without waiting for an LLM-generated homepage.
+func (h Handler) listDocs(w http.ResponseWriter, r *http.Request) {
+	registry, err := h.Docs.List()
+	if err != nil {
+		http.Error(w, "failed to list documents: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if registry == nil {
+		registry = []docs.DocInfo{}
+	}
+	writeJSON(w, registry)
 }
 
 func (h Handler) health(w http.ResponseWriter, r *http.Request) {
@@ -49,20 +64,14 @@ func (h Handler) generate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var system, user string
-	var homeHash string
+	var cacheKey, cacheHash string
 	if req.Doc == "" {
 		registry, err := h.Docs.List()
 		if err != nil {
 			http.Error(w, "failed to list documents: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		homeHash = RegistryHash(registry)
-		if !req.Force {
-			if cached, ok := h.HomeCache.Load(homeHash); ok {
-				streamCached(w, cached)
-				return
-			}
-		}
+		cacheKey, cacheHash = "home", RegistryHash(registry)
 		system, user = prompts.HomeMessages(registry)
 	} else {
 		markdown, err := h.Docs.Read(req.Doc)
@@ -70,8 +79,18 @@ func (h Handler) generate(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "unknown document: "+req.Doc, http.StatusNotFound)
 			return
 		}
+		cacheKey, cacheHash = "doc:"+req.Doc, contentHash(markdown)
 		info := docInfoFor(h.Docs, req.Doc)
 		system, user = prompts.DocMessages(info, markdown, req.RepairNotes)
+	}
+
+	// A repair pass must never read the cache: the cached page is the one that
+	// just failed validation. Its (better) output still overwrites the cache.
+	if !req.Force && len(req.RepairNotes) == 0 {
+		if cached, ok := h.Cache.Load(cacheKey, cacheHash); ok {
+			streamCached(w, cached)
+			return
+		}
 	}
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -106,9 +125,7 @@ func (h Handler) generate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if homeHash != "" {
-		h.HomeCache.Save(homeHash, generated.String())
-	}
+	h.Cache.Save(cacheKey, cacheHash, generated.String())
 
 	if err := writeSSE(w, "done", map[string]string{"status": "done"}); err != nil {
 		log.Printf("write done event: %v", err)

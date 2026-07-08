@@ -7,3 +7,5 @@ backend/data/
 .github
 .DS_Store
 backend/data/.home-cache.json
+.home-cache.json
+.page-cache.json

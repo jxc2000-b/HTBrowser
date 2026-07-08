@@ -53,6 +53,10 @@ func (c *Client) ChatCompletionsURL() string { //appends client api url
 // OpenAI-compatible payload and avoids provider-specific fields.
 // first validate client then
 func (c *Client) StreamChat(ctx context.Context, messages []Message, onDelta func(string) error) error {
+	return c.streamChat(ctx, messages, nil, onDelta)
+}
+
+func (c *Client) streamChat(ctx context.Context, messages []Message, temperature *float64, onDelta func(string) error) error {
 	if err := c.validate(); err != nil {
 		return err
 	}
@@ -64,9 +68,10 @@ func (c *Client) StreamChat(ctx context.Context, messages []Message, onDelta fun
 	defer cancel()
 
 	payload := chatCompletionRequest{
-		Model:    c.Model,
-		Messages: messages,
-		Stream:   true,
+		Model:       c.Model,
+		Messages:    messages,
+		Stream:      true,
+		Temperature: temperature,
 	}
 
 	body, err := json.Marshal(payload) //returns json
@@ -107,9 +112,11 @@ func (c *Client) StreamChat(ctx context.Context, messages []Message, onDelta fun
 
 // Chat sends messages and returns the complete (non-streamed) response text.
 // Used for the validator, which needs a single JSON answer rather than deltas.
+// It runs at temperature 0: verdicts on identical input should be identical.
 func (c *Client) Chat(ctx context.Context, messages []Message) (string, error) {
 	var builder strings.Builder
-	err := c.StreamChat(ctx, messages, func(delta string) error {
+	zero := 0.0
+	err := c.streamChat(ctx, messages, &zero, func(delta string) error {
 		builder.WriteString(delta)
 		return nil
 	})
@@ -133,7 +140,8 @@ func (c *Client) validate() error { // client field null checks
 }
 
 type chatCompletionRequest struct {
-	Model    string    `json:"model"`
-	Messages []Message `json:"messages"`
-	Stream   bool      `json:"stream"`
+	Model       string    `json:"model"`
+	Messages    []Message `json:"messages"`
+	Stream      bool      `json:"stream"`
+	Temperature *float64  `json:"temperature,omitempty"`
 }

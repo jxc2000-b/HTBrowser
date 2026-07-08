@@ -85,8 +85,8 @@ func describe(path, fallbackTitle string) (string, string) {
 		}
 		if !strings.HasPrefix(line, "#") && summary == "" {
 			summary = line
-			if len(summary) > 140 {
-				summary = summary[:140] + "…"
+			if runes := []rune(summary); len(runes) > 140 {
+				summary = string(runes[:140]) + "…"
 			}
 		}
 		if title != fallbackTitle && summary != "" {

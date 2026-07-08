@@ -1,5 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
-import { streamGeneratedPage, validatePage, type StreamHandle, type ValidationResult } from './api';
+import {
+  fetchDocs,
+  streamGeneratedPage,
+  validatePage,
+  type DocInfo,
+  type StreamHandle,
+  type ValidationResult,
+} from './api';
 import { Sandbox } from './components/Sandbox';
 import './styles/styles.css';
 
@@ -18,6 +25,7 @@ function App() {
   const [doc, setDoc] = useState(''); // '' = homepage
   const [validation, setValidation] = useState<ValidationResult | null>(null);
   const [repairUsed, setRepairUsed] = useState(false);
+  const [docList, setDocList] = useState<DocInfo[]>([]);
 
   const streamRef = useRef<StreamHandle | null>(null);
   const bufferRef = useRef({ html: '', chunks: 0 });
@@ -78,7 +86,11 @@ function App() {
     setStatus('validating');
     try {
       const result = await validatePage(targetDoc, bufferRef.current.html);
-      const failed = result.claims.filter((claim) => claim.verdict !== 'match');
+      // 'unverified' means the validator itself was unavailable — those claims
+      // stay dashed and must not trigger a repair pass or the red banner.
+      const failed = result.claims.filter(
+        (claim) => claim.verdict !== 'match' && claim.verdict !== 'unverified',
+      );
 
       if (failed.length > 0 && repairAllowed) {
         const notes = failed.map((claim) => {
@@ -92,7 +104,8 @@ function App() {
       }
 
       setValidation(result);
-      setStatus(failed.length > 0 ? 'partial' : 'verified');
+      const anyUnverified = result.claims.some((claim) => claim.verdict === 'unverified');
+      setStatus(failed.length > 0 ? 'partial' : anyUnverified ? 'done' : 'verified');
     } catch (validationError) {
       setError(validationError instanceof Error ? validationError.message : 'Validation failed.');
       setStatus('error');
@@ -120,13 +133,19 @@ function App() {
     }
   };
 
-  // Load the homepage on first visit
+  // Load the homepage on first visit, and the document registry for the nav
+  // strip — a plain JSON fetch, so navigation is usable before (and without)
+  // any LLM generation finishing.
   useEffect(() => {
     generate('');
+    fetchDocs()
+      .then(setDocList)
+      .catch(() => setDocList([]));
   }, []);
 
   const isGenerating = status === 'generating';
-  const failedClaims = validation?.claims.filter((claim) => claim.verdict !== 'match') ?? [];
+  const failedClaims =
+    validation?.claims.filter((claim) => claim.verdict !== 'match' && claim.verdict !== 'unverified') ?? [];
 
   const statusLabel: Record<Status, string> = {
     idle: 'Ready',
@@ -164,6 +183,29 @@ function App() {
           )}
         </div>
       </section>
+
+      {docList.length > 0 && (
+        <nav className="doc-nav" aria-label="Documents">
+          <button
+            type="button"
+            className={`doc-nav-link${doc === '' ? ' doc-nav-active' : ''}`}
+            onClick={() => navigate('/')}
+          >
+            Home
+          </button>
+          {docList.map((info) => (
+            <button
+              key={info.id}
+              type="button"
+              className={`doc-nav-link${doc === info.id ? ' doc-nav-active' : ''}`}
+              title={info.summary || info.title}
+              onClick={() => navigate(`/doc/${info.id}`)}
+            >
+              {info.title}
+            </button>
+          ))}
+        </nav>
+      )}
 
       {error && <div className="error-banner">{error}</div>}
 
