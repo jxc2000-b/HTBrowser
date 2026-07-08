@@ -22,6 +22,8 @@ func (h Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/docs", h.listDocs)
 	mux.HandleFunc("POST /api/generate", h.generate)
 	mux.HandleFunc("POST /api/validate", h.validate)
+	mux.HandleFunc("POST /api/upload", h.upload)
+	mux.HandleFunc("POST /api/ingest", h.ingest)
 }
 
 // listDocs returns the document registry as plain JSON so the frontend can

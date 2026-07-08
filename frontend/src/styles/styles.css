@@ -203,7 +203,155 @@ h1 {
   background: white;
 }
 
+.upload-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.upload-disabled {
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+.review-shell {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  border: 1px solid #b8c4d4;
+  background: #f8fafc;
+  padding: 14px 16px;
+}
+
+.review-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.review-hint {
+  margin: 0;
+  max-width: 720px;
+  color: #3f4b5f;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.review-panes {
+  flex: 1;
+  min-height: 320px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+/* Both panes share exact font metrics: the gutter, the backdrop, and the
+   transparent textarea must line up pixel-for-pixel. */
+.review-pane,
+.review-pane pre,
+.review-pane textarea,
+.review-gutter {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.review-pane {
+  display: flex;
+  min-height: 0;
+  border: 1px solid #b8c4d4;
+  background: #ffffff;
+  overflow: hidden;
+}
+
+.review-gutter {
+  flex: none;
+  min-width: 40px;
+  padding: 12px 8px 12px 0;
+  text-align: right;
+  color: #8a97a8;
+  background: #f1f5f9;
+  border-right: 1px solid #dde5ee;
+  overflow: hidden;
+  user-select: none;
+}
+
+.review-gutter-flagged {
+  color: #dc2626;
+  font-weight: 700;
+}
+
+/* Left pane: one scroll container holds gutter + text so they move together;
+   the gutter sticks during horizontal scrolling. */
+.review-scroll {
+  flex: 1;
+  display: flex;
+  align-items: flex-start;
+  overflow: auto;
+}
+
+.review-scroll .review-gutter {
+  position: sticky;
+  left: 0;
+  min-height: 100%;
+}
+
+.review-original {
+  flex: 1;
+  margin: 0;
+  padding: 12px;
+  white-space: pre;
+}
+
+.review-editor {
+  position: relative;
+  flex: 1;
+  overflow: hidden;
+}
+
+.review-backdrop,
+.review-extracted {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  padding: 12px;
+  white-space: pre;
+  overflow: hidden;
+}
+
+.review-backdrop {
+  color: #18202f;
+}
+
+.review-line-flagged {
+  text-decoration: underline wavy;
+  text-decoration-color: #ef4444;
+  text-decoration-skip-ink: none;
+  background: rgba(239, 68, 68, 0.07);
+}
+
+.review-extracted {
+  border: 0;
+  outline: none;
+  resize: none;
+  background: transparent;
+  color: transparent;
+  caret-color: #18202f;
+  overflow: auto;
+}
+
+.review-extracted::selection {
+  background: rgba(35, 89, 214, 0.25);
+}
+
 @media (max-width: 720px) {
+  .review-panes {
+    grid-template-columns: 1fr;
+  }
+
   .app-shell {
     padding: 10px;
   }

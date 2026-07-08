@@ -1,0 +1,4 @@
+# TRIGLYCERIDE
+range: 0 - 149 mg/dL
+2025-02-10 48 mg/dL
+2026-06-09 37 mg/dL

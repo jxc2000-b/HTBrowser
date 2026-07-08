@@ -12,6 +12,10 @@ declare module 'react' {
 
   export function useEffect(effect: () => void | (() => void), deps?: unknown[]): void;
 
+  export type ChangeEvent<T = Element> = {
+    target: T;
+  };
+
   const React: {
     StrictMode: unknown;
   };

@@ -48,6 +48,48 @@ export async function fetchDocs(): Promise<DocInfo[]> {
   return (await response.json()) as DocInfo[];
 }
 
+export type ExtractedClaim = {
+  line: number;
+  metric: string;
+  date: string;
+  value: string;
+  unit?: string;
+  /** 'unverified' covers conversions and repairs as well as fabrications — the user judges. */
+  verdict: 'match' | 'unverified';
+};
+
+export type UploadReview = {
+  original: string;
+  extracted: string;
+  claims: ExtractedClaim[];
+};
+
+/** Sends a raw markdown document for extraction; returns the review payload. */
+export async function uploadDocument(filename: string, content: string): Promise<UploadReview> {
+  const response = await fetch('/api/upload', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ filename, content }),
+  });
+  if (!response.ok) {
+    throw new Error((await response.text()) || `Upload failed (${response.status}).`);
+  }
+  return (await response.json()) as UploadReview;
+}
+
+/** Ingests approved (possibly user-edited) canonical markdown into the document bank. */
+export async function ingestDocument(extracted: string): Promise<{ files: string[] }> {
+  const response = await fetch('/api/ingest', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ extracted }),
+  });
+  if (!response.ok) {
+    throw new Error((await response.text()) || `Ingest failed (${response.status}).`);
+  }
+  return (await response.json()) as { files: string[] };
+}
+
 export type ValidationResult = {
   status: 'verified' | 'partial' | 'no_claims';
   claims: ClaimResult[];

@@ -58,11 +58,8 @@ DATA RULES (critical):
 - Every health data value you display (numbers, dates, ranges, scores) MUST come verbatim from the document. Never estimate, extrapolate, average, convert units, or invent values.
 - Copy values character-for-character as the document formats them: 5.10 stays 5.10 (not 5.1), 0.9 stays 0.9 (not .9).
 - ALWAYS display numbers as digits, never as words. Write "180", never "one hundred and eighty"; write "84", never "eighty-four". If the document itself spells a number out in words, convert it to digits for display (e.g. the document says "twenty-eight ng/ml" → display 28).
-- Wrap EVERY displayed health value in a claim span:
-    <span data-value="4.2" data-label="TSH" data-unit="mIU/L" data-date="2026-03-01">4.2</span>
-  data-value is the bare value, data-label names the metric as the document names it, data-unit and data-date are included when the document provides them. The visible text must equal data-value (plus the unit if you show it inline).
-- If a value you want is not in the document, render "—" with no claim span instead.
-- Reference ranges and qualitative statuses from the document get claim spans too.
+- Health values appear ONLY inside chart data-chart JSON payloads (see CHARTS below) — never as text on the page.
+- If a value you want to plot is not in the document, leave it out; never fill gaps with estimates.
 
 CHARTS (critical):
 Where the document contains a time series or comparable values, include charts. Do NOT write any JavaScript. Instead emit a canvas element whose data-chart attribute is single-quoted JSON, and the host page renders it with Chart.js:
@@ -76,18 +73,17 @@ Where the document contains a time series or comparable values, include charts. 
 - A bar chart comparing related components measured in the SAME unit (e.g. total cholesterol vs LDL vs HDL, all mg/dL) is acceptable; mixing units is not.
 - Write valid JSON numbers with leading zeros (0.9, never .9). Keep the document's formatting: if the document says 5.10, write 5.10, not 5.1.
 - Always wrap the canvas in a div with a Tailwind height class (e.g. h-64).
-- Include 1-3 charts when the data supports them.
+- Include a chart for EVERY metric the document supports: any metric with two or more comparable readings gets its own chart.
+- A metric with only a single reading is OMITTED entirely — no chart, no stat, no text mention.
 
-CONTENT:
-Build a rich page: headline stats, charts, a detailed table of readings, and a "visualization notes" section. Show the source document name. Link back to home.
-
-VISUALIZATION NOTES:
-The notes section must ONLY define what each variable on the page measures — a neutral, textbook definition of the test or quantity itself, in one or two plain-language sentences each (e.g. "TSH (thyroid stimulating hormone) is a hormone produced by the pituitary gland; the TSH blood test measures its concentration and is commonly used to assess thyroid function.").
-STRICTLY FORBIDDEN in these notes:
-- Any statement about what the user's specific values mean, whether they are high/low/normal/good/bad, or how they have changed.
-- Any health impact, risk, consequence, cause, or implication of the measurement (e.g. do NOT say "high LDL increases heart disease risk").
-- Any advice, recommendation, target, or threshold.
-Define only what the thing IS and what is being measured — nothing about its effect on health or the meaning of the results. Do not introduce any numbers in the notes.`
+CONTENT (simple view — charts only):
+The page contains ONLY charts. Render a minimal header — the page title, the source document name, and a link back to home — followed by a responsive grid of chart cards, and nothing else.
+STRICTLY FORBIDDEN on the page:
+- Headline stats, stat tiles, or standalone displayed values of any kind.
+- Tables of readings or any other tabular data.
+- "Visualization notes", definitions, summaries, interpretations, or any prose sections.
+- Any health data value rendered as text outside a chart. Because of this, the page should contain NO claim spans — every value on the page lives inside a data-chart JSON payload.
+The only text on the page is the header and each chart's title (with its unit).`
 
 const validatorSystemPrompt = `You are a strict data validator for a health dashboard. You verify that values displayed on a generated page exist in a source markdown document.
 
@@ -110,6 +106,35 @@ Rules:
 - A range written as "9-23", "(9 - 23)", or "0.35 - 4.94" CONTAINS both endpoints: a claim of 23 matches the line "BUN/CREAT RATIO 15 (9-23)", and a claim of 9 matches it too.
 - Never invent line numbers.`
 
+const extractorSystemPrompt = `You convert a raw personal health document into a canonical measurement markdown file.
+
+OUTPUT FORMAT (strict). For each metric found in the document:
+
+# METRIC NAME
+range: 0 - 199 mg/dL
+2025-02-10 153 mg/dL
+2026-06-09 175 mg/dL
+
+- One metric per "# " heading, named as the document names it.
+- The "range:" line is included ONLY if the document provides a reference range for that metric; keep its unit.
+- One reading per line: ISO date (YYYY-MM-DD), then the value, then the unit if the document has one. Nothing else on the line.
+- Readings stay in chronological order.
+
+RULES:
+- Normalize dates to YYYY-MM-DD.
+- Write numbers as digits with dot decimals (81,4 becomes 81.4; "twenty-eight" becomes 28).
+- You MAY convert units, but use ONE unit consistently within a metric — prefer the unit the document uses most for that metric. Keep the source's precision; do not add invented digits.
+- Skip missing readings (cells like "-", "_", or blank). Never estimate or fill gaps.
+- Small repairs are allowed (obvious typos, misaligned table cells), inventing data is not.
+- Output ONLY the canonical markdown: no prose, no tables, no code fences, no commentary.`
+
+// ExtractorMessages builds the prompt pair for converting an uploaded raw
+// document into the canonical measurement format.
+func ExtractorMessages(filename, content string) (system string, user string) {
+	user = fmt.Sprintf("Convert this document (%s) into canonical measurement markdown.\n\n<<<DOCUMENT\n%s\nDOCUMENT", filename, content)
+	return extractorSystemPrompt, user
+}
+
 // HomeMessages builds the prompt pair for the homepage.
 func HomeMessages(registry []docs.DocInfo) (system string, user string) {
 	registryJSON, _ := json.MarshalIndent(registry, "", "  ")
@@ -125,7 +150,7 @@ func DocMessages(doc docs.DocInfo, markdown string, repairNotes []string) (syste
 
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "Generate the dashboard page for document %q (id: %s).\n\nSOURCE DOCUMENT (%s.md):\n<<<DOCUMENT\n%s\nDOCUMENT", doc.Title, doc.ID, doc.ID, markdown)
-	sb.WriteString("\n\nRemember: every displayed value needs a claim span, charts use data-chart JSON, and nothing may be displayed that is not verbatim in the document.")
+	sb.WriteString("\n\nRemember: the page is charts only — no stats, tables, or notes. Charts use data-chart JSON, and nothing may be plotted that is not verbatim in the document.")
 
 	if len(repairNotes) > 0 {
 		sb.WriteString("\n\nIMPORTANT — REPAIR PASS: a previous attempt displayed values that failed validation against the document. Do not display these again unless they appear verbatim in the document:\n")

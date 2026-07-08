@@ -1,13 +1,17 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ChangeEvent } from 'react';
 import {
   fetchDocs,
+  ingestDocument,
   streamGeneratedPage,
+  uploadDocument,
   validatePage,
   type DocInfo,
   type StreamHandle,
+  type UploadReview as UploadReviewData,
   type ValidationResult,
 } from './api';
 import { Sandbox } from './components/Sandbox';
+import { UploadReview } from './components/UploadReview';
 import './styles/styles.css';
 
 // Models stream many tiny deltas per second; re-rendering the sandbox for each
@@ -26,6 +30,8 @@ function App() {
   const [validation, setValidation] = useState<ValidationResult | null>(null);
   const [repairUsed, setRepairUsed] = useState(false);
   const [docList, setDocList] = useState<DocInfo[]>([]);
+  const [review, setReview] = useState<UploadReviewData | null>(null);
+  const [reviewBusy, setReviewBusy] = useState(false);
 
   const streamRef = useRef<StreamHandle | null>(null);
   const bufferRef = useRef({ html: '', chunks: 0 });
@@ -50,8 +56,6 @@ function App() {
     setRepairUsed(Boolean(repairNotes?.length));
     setStatus('generating');
 
-    const isRepair = Boolean(repairNotes?.length);
-
     streamRef.current = streamGeneratedPage(
       { doc: targetDoc || undefined, repairNotes, force },
       {
@@ -72,8 +76,9 @@ function App() {
           flushBuffer();
           streamRef.current = null;
           if (targetDoc) {
-            // A repair pass gets validated too, but cannot trigger another repair.
-            void runValidation(targetDoc, !isRepair);
+            // Repair passes are disabled: documents are user-verified at
+            // ingestion, so failures are just highlighted, not regenerated.
+            void runValidation(targetDoc, false);
           } else {
             setStatus('done'); // homepage shows no data values, nothing to validate
           }
@@ -109,6 +114,37 @@ function App() {
     } catch (validationError) {
       setError(validationError instanceof Error ? validationError.message : 'Validation failed.');
       setStatus('error');
+    }
+  };
+
+  const handleUpload = async (file: File) => {
+    setError('');
+    setStatus('validating');
+    try {
+      const content = await file.text();
+      setReview(await uploadDocument(file.name, content));
+      setStatus('idle');
+    } catch (uploadError) {
+      setError(uploadError instanceof Error ? uploadError.message : 'Upload failed.');
+      setStatus('error');
+    }
+  };
+
+  const approveReview = async (extracted: string) => {
+    setReviewBusy(true);
+    setError('');
+    try {
+      await ingestDocument(extracted);
+      setReview(null);
+      // New metric files exist now: refresh the nav and regenerate home.
+      fetchDocs()
+        .then(setDocList)
+        .catch(() => {});
+      generate('');
+    } catch (ingestError) {
+      setError(ingestError instanceof Error ? ingestError.message : 'Saving failed.');
+    } finally {
+      setReviewBusy(false);
     }
   };
 
@@ -167,6 +203,22 @@ function App() {
 
         <div className="actions">
           <span className={`status-pill status-${status}`}>{statusLabel[status]}</span>
+          {!doc && !review && (
+            <label className={`secondary-button upload-button${isGenerating ? ' upload-disabled' : ''}`}>
+              Upload
+              <input
+                type="file"
+                accept=".md,text/markdown"
+                hidden
+                disabled={isGenerating}
+                onChange={(e: ChangeEvent<HTMLInputElement>) => {
+                  const file = e.target.files?.[0];
+                  e.target.value = '';
+                  if (file) void handleUpload(file);
+                }}
+              />
+            </label>
+          )}
           {doc && !isGenerating && (
             <button type="button" className="secondary-button" onClick={() => generate('')}>
               Home
@@ -184,7 +236,7 @@ function App() {
         </div>
       </section>
 
-      {docList.length > 0 && (
+      {docList.length > 0 && !review && (
         <nav className="doc-nav" aria-label="Documents">
           <button
             type="button"
@@ -242,15 +294,24 @@ function App() {
         )}
       </section>
 
-      <section className="preview-shell">
-        <Sandbox
-          html={html}
-          final={!isGenerating && status !== 'idle'}
-          validation={validation}
-          docName={doc}
-          onNavigate={navigate}
+      {review ? (
+        <UploadReview
+          review={review}
+          busy={reviewBusy}
+          onApprove={(extracted) => void approveReview(extracted)}
+          onCancel={() => setReview(null)}
         />
-      </section>
+      ) : (
+        <section className="preview-shell">
+          <Sandbox
+            html={html}
+            final={!isGenerating && status !== 'idle'}
+            validation={validation}
+            docName={doc}
+            onNavigate={navigate}
+          />
+        </section>
+      )}
     </main>
   );
 }
