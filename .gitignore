@@ -9,7 +9,7 @@ backend/data/.home-cache.json
 .home-cache.json
 .page-cache.json
 backend/test-run/
-backend/test-data/
+backend/test-data
 *.leader
 
 logs
