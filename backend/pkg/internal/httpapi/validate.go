@@ -90,6 +90,26 @@ func (h Handler) validate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Canonical documents skip the LLM entirely: pages are rendered
+	// programmatically from the file, so a gate-passed value located on a
+	// line is a match by construction — context judgment adds nothing.
+	if isCanonical(markdown) {
+		for i := range results {
+			if results[i].Note != "" || results[i].Verdict == "match" {
+				continue // gate-failed (or already settled) claims keep their verdict
+			}
+			if line := locateValueLine(results[i].Claim, lines, 0); line > 0 {
+				results[i].Verdict = "match"
+				results[i].Line = line
+			} else {
+				results[i].Verdict = "citation_mismatch"
+				results[i].Note = "value could not be located on any line of the document"
+			}
+		}
+		writeJSON(w, validateResponse{Status: overallStatus(results), Claims: results})
+		return
+	}
+
 	// Layer 2: LLM binds each surviving claim to a source line. A validator
 	// outage must not take down an otherwise-rendered page: retry once, then
 	// degrade to "unverified" (dashed, not flagged red) for the claims that
@@ -153,15 +173,16 @@ func (h Handler) validate(w http.ResponseWriter, r *http.Request) {
 		results[i].Note = ""
 	}
 
-	status := "verified"
+	writeJSON(w, validateResponse{Status: overallStatus(results), Claims: results})
+}
+
+func overallStatus(results []ClaimResult) string {
 	for _, result := range results {
 		if result.Verdict != "match" {
-			status = "partial"
-			break
+			return "partial"
 		}
 	}
-
-	writeJSON(w, validateResponse{Status: status, Claims: results})
+	return "verified"
 }
 
 type llmVerdict struct {

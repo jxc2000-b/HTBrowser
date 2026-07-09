@@ -1,5 +1,0 @@
-# CHOLESTEROL
-range: 0 - 199 mg/dL
-2025-02-10 153 mg/dL
-2026-04-02 206 mg/dL
-2026-06-09 175 mg/dL

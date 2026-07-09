@@ -19,7 +19,7 @@ func main() {
 		log.Fatalf("load config: %v", err)
 	}
 
-	llmClient := llm.NewClient( 
+	llmClient := llm.NewClient(
 		cfg.LLM.APIKey,
 		cfg.LLM.BaseURL,
 		cfg.LLM.Model,

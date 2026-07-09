@@ -1,7 +1,6 @@
 package prompts
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -46,11 +45,6 @@ SAFETY:
 - Do not recommend treatment.
 - Phrase insights as visualization notes, not medical advice.`
 
-const homeInstructions = `TASK:
-Generate the dashboard HOME page: a polished navigation hub for the user's health documents.
-
-You are given the registry of available documents as JSON. Create a card or tile per document linking to /doc/DOC_ID, using each document's title and summary. Make the page feel like a local-first technical tool for exploring personal health data. Do not display any specific health values, since you have not been given any document contents — the cards describe and link to the documents only.`
-
 const docInstructions = `TASK:
 Generate the dashboard page for ONE health document. The complete markdown source of that document is provided below. It is the ONLY source of truth.
 
@@ -74,6 +68,7 @@ Where the document contains a time series or comparable values, include charts. 
 - Write valid JSON numbers with leading zeros (0.9, never .9). Keep the document's formatting: if the document says 5.10, write 5.10, not 5.1.
 - Always wrap the canvas in a div with a Tailwind height class (e.g. h-64).
 - Include a chart for EVERY metric the document supports: any metric with two or more comparable readings gets its own chart.
+- Make sure the chart spans the entire screen 
 - A metric with only a single reading is OMITTED entirely — no chart, no stat, no text mention.
 
 CONTENT (simple view — charts only):
@@ -133,14 +128,6 @@ RULES:
 func ExtractorMessages(filename, content string) (system string, user string) {
 	user = fmt.Sprintf("Convert this document (%s) into canonical measurement markdown.\n\n<<<DOCUMENT\n%s\nDOCUMENT", filename, content)
 	return extractorSystemPrompt, user
-}
-
-// HomeMessages builds the prompt pair for the homepage.
-func HomeMessages(registry []docs.DocInfo) (system string, user string) {
-	registryJSON, _ := json.MarshalIndent(registry, "", "  ")
-	system = pageContract + "\n\n" + homeInstructions
-	user = fmt.Sprintf("Generate the dashboard home page.\n\nDOCUMENT REGISTRY:\n%s", registryJSON)
-	return system, user
 }
 
 // DocMessages builds the prompt pair for a single document page. repairNotes,

@@ -65,26 +65,36 @@ func (h Handler) generate(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&req) // empty body means homepage
 	}
 
-	var system, user string
-	var cacheKey, cacheHash string
+	// The homepage is pure registry data — rendered programmatically, no LLM,
+	// no cache.
 	if req.Doc == "" {
 		registry, err := h.Docs.List()
 		if err != nil {
 			http.Error(w, "failed to list documents: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		cacheKey, cacheHash = "home", RegistryHash(registry)
-		system, user = prompts.HomeMessages(registry)
-	} else {
-		markdown, err := h.Docs.Read(req.Doc)
-		if err != nil {
-			http.Error(w, "unknown document: "+req.Doc, http.StatusNotFound)
-			return
-		}
-		cacheKey, cacheHash = "doc:"+req.Doc, contentHash(markdown)
-		info := docInfoFor(h.Docs, req.Doc)
-		system, user = prompts.DocMessages(info, markdown, req.RepairNotes)
+		streamCached(w, homePage(registry))
+		return
 	}
+
+	markdown, err := h.Docs.Read(req.Doc)
+	if err != nil {
+		http.Error(w, "unknown document: "+req.Doc, http.StatusNotFound)
+		return
+	}
+	info := docInfoFor(h.Docs, req.Doc)
+	// Canonical documents render programmatically too: the file IS the chart
+	// spec, so no LLM, no cache, and nothing to hallucinate.
+	if page, ok := canonicalPage(info, markdown); ok {
+		streamCached(w, page)
+		return
+	}
+	// Legacy non-canonical documents fall back to LLM generation.
+	system, user := prompts.DocMessages(info, markdown, req.RepairNotes)
+	// Hash the repair-free prompt so a repair pass saves under the same key a
+	// normal visit will look up.
+	baseSystem, baseUser := prompts.DocMessages(info, markdown, nil)
+	cacheKey, cacheHash := "doc:"+req.Doc, contentHash(baseSystem+baseUser)
 
 	// A repair pass must never read the cache: the cached page is the one that
 	// just failed validation. Its (better) output still overwrites the cache.
@@ -112,7 +122,7 @@ func (h Handler) generate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var generated strings.Builder
-	err := h.LLM.StreamChat(r.Context(), messages, func(delta string) error {
+	err = h.LLM.StreamChat(r.Context(), messages, func(delta string) error {
 		generated.WriteString(delta)
 		if err := writeSSE(w, "delta", map[string]string{"text": delta}); err != nil {
 			return err

@@ -7,14 +7,12 @@ import (
 	"log"
 	"os"
 	"sync"
-
-	"health-dash/pkg/internal/docs"
 )
 
 // PageCache stores the last generated page per key ("home", "doc:<id>"), each
-// guarded by a content hash: the registry hash for the homepage, the document
-// content hash for doc pages. A page is served from cache until its source
-// changes or the user forces a regeneration.
+// guarded by a hash of the full generation prompt, so a page is served from
+// cache until its source document, the registry, or the prompts change — or
+// the user forces a regeneration.
 type PageCache struct {
 	mu   sync.Mutex
 	path string
@@ -27,14 +25,6 @@ type pageCacheEntry struct {
 
 func NewPageCache(path string) *PageCache {
 	return &PageCache{path: path}
-}
-
-func RegistryHash(registry []docs.DocInfo) string {
-	payload, err := json.Marshal(registry)
-	if err != nil {
-		return ""
-	}
-	return contentHash(string(payload))
 }
 
 func contentHash(content string) string {

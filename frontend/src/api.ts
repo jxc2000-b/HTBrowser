@@ -77,13 +77,46 @@ export async function uploadDocument(filename: string, content: string): Promise
   return (await response.json()) as UploadReview;
 }
 
-/** Ingests approved (possibly user-edited) canonical markdown into the document bank. */
-export async function ingestDocument(extracted: string): Promise<{ files: string[] }> {
+/** An incoming reading whose unit contradicts the target file's established unit. */
+export type UnitConflict = {
+  metric: string;
+  /** 1-indexed line in the submitted extracted markdown. */
+  line: number;
+  text: string;
+  unit: string;
+  existingUnit: string;
+  target: string;
+};
+
+/** Thrown by ingestDocument when the merge is rejected over unit mismatches. */
+export class IngestConflictError extends Error {
+  conflicts: UnitConflict[];
+
+  constructor(conflicts: UnitConflict[]) {
+    super('Unit mismatch with existing files.');
+    this.conflicts = conflicts;
+  }
+}
+
+/**
+ * Ingests approved (possibly user-edited) canonical markdown into the document bank.
+ * assignments maps a heading's metric name to the user's identity resolution:
+ * an existing doc ID to merge into, or '' to force a new standalone file.
+ * Throws IngestConflictError (nothing written) on unit mismatches.
+ */
+export async function ingestDocument(
+  extracted: string,
+  assignments: Record<string, string>,
+): Promise<{ files: string[] }> {
   const response = await fetch('/api/ingest', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ extracted }),
+    body: JSON.stringify({ extracted, assignments }),
   });
+  if (response.status === 409) {
+    const payload = (await response.json()) as { conflicts: UnitConflict[] };
+    throw new IngestConflictError(payload.conflicts || []);
+  }
   if (!response.ok) {
     throw new Error((await response.text()) || `Ingest failed (${response.status}).`);
   }

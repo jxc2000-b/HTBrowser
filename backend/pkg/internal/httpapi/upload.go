@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -81,15 +83,41 @@ type ingestRequest struct {
 	// Extracted is the (possibly user-edited) canonical markdown. User edits
 	// are terminal: whatever is approved here becomes ground truth.
 	Extracted string `json:"extracted"`
+	// Assignments maps a heading's metric name to the user's identity
+	// resolution from the review screen: an existing document ID to append
+	// to, or "" to force a new standalone file even if the slug collides.
+	// Headings absent from the map use the default slug behavior.
+	Assignments map[string]string `json:"assignments"`
 }
 
 type ingestResponse struct {
-	Files []string `json:"files"` // document IDs written or appended to
+	Files []string `json:"files"` // document IDs written or merged into
 }
 
-// ingest deterministically chunks approved canonical markdown into one file
-// per metric in the data directory: appended if the metric file exists,
-// created otherwise. No merge semantics yet — append only.
+// UnitConflict reports an incoming reading whose unit contradicts the target
+// file's established unit. The line/text reference the submitted extracted
+// markdown so the review screen can underline the offending unit in place.
+type UnitConflict struct {
+	Metric       string `json:"metric"`
+	Line         int    `json:"line"`
+	Text         string `json:"text"`
+	Unit         string `json:"unit"`
+	ExistingUnit string `json:"existingUnit"`
+	Target       string `json:"target"`
+}
+
+type ingestConflictResponse struct {
+	Error     string         `json:"error"` // "unit_mismatch"
+	Conflicts []UnitConflict `json:"conflicts"`
+}
+
+// ingest deterministically merges approved canonical markdown into the data
+// directory, one file per metric: parse both sides, unite, stable-sort by
+// date, dedupe semantic duplicates, rewrite the whole file. A unit mismatch
+// against an existing file rejects the entire ingest (nothing is written)
+// with a 409 carrying the conflicting lines, so the review screen can send
+// the user back to fix them. Merging never converts units and never drops
+// content it does not understand.
 func (h Handler) ingest(w http.ResponseWriter, r *http.Request) {
 	var req ingestRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxUploadBytes)).Decode(&req); err != nil {
@@ -103,37 +131,79 @@ func (h Handler) ingest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var files []string
+	// Resolve every chunk's target and collect unit conflicts before writing
+	// anything: the ingest is all-or-nothing.
+	type plannedWrite struct {
+		id    string
+		chunk metricChunk
+	}
+	var plan []plannedWrite
+	var conflicts []UnitConflict
 	for _, chunk := range chunks {
 		id := metricSlug(chunk.Metric)
 		if id == "" {
 			continue
 		}
-		path := filepath.Join(h.Docs.Dir, id+".md")
-		if err := appendChunk(path, chunk); err != nil {
-			http.Error(w, fmt.Sprintf("write %s: %v", id, err), http.StatusInternalServerError)
+		if target, resolved := req.Assignments[chunk.Metric]; resolved {
+			if target != "" && validDocIDString(target) {
+				id = target // user matched this heading to an existing document
+			} else {
+				// User rejected all matches: force a standalone file, suffixing
+				// if the slug would collide with an existing document.
+				id = uniqueDocID(h.Docs.Dir, id)
+			}
+		}
+		existing := readFileIfExists(filepath.Join(h.Docs.Dir, id+".md"))
+		conflicts = append(conflicts, unitConflicts(existing, chunk, id)...)
+		plan = append(plan, plannedWrite{id: id, chunk: chunk})
+	}
+
+	if len(conflicts) > 0 {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_ = json.NewEncoder(w).Encode(ingestConflictResponse{Error: "unit_mismatch", Conflicts: conflicts})
+		return
+	}
+
+	var files []string
+	for _, write := range plan {
+		path := filepath.Join(h.Docs.Dir, write.id+".md")
+		// Read fresh: two chunks in one ingest may target the same file.
+		merged := mergeCanonical(readFileIfExists(path), write.chunk)
+		if err := os.WriteFile(path, []byte(merged), 0o644); err != nil {
+			http.Error(w, fmt.Sprintf("write %s: %v", write.id, err), http.StatusInternalServerError)
 			return
 		}
-		files = append(files, id)
+		files = append(files, write.id)
 	}
 
 	writeJSON(w, ingestResponse{Files: files})
 }
 
-// metricChunk is one "# METRIC" section of canonical markdown.
+// reading is one parsed canonical reading line.
+type reading struct {
+	Line  int // 1-indexed line in the source it was parsed from
+	Text  string
+	Date  string
+	Value string
+	Unit  string
+}
+
+// metricChunk is one "# METRIC" section of canonical markdown. Lines that
+// parse as neither range nor reading are residue: preserved verbatim, never
+// merged or deduped — user content is not dropped for being unrecognized.
 type metricChunk struct {
 	Metric   string
-	Range    string   // the "range:" line, if present
-	Readings []string // reading lines, verbatim
+	Range    string
+	Readings []reading
+	Residue  []string
 }
 
 // parseCanonical splits canonical measurement markdown into metric chunks.
-// Unrecognized lines inside a section are kept as readings — the user
-// approved them, and dropping approved content silently would be worse.
 func parseCanonical(markdown string) []metricChunk {
 	var chunks []metricChunk
 	var current *metricChunk
-	for _, line := range strings.Split(markdown, "\n") {
+	for i, line := range strings.Split(markdown, "\n") {
 		line = strings.TrimSpace(line)
 		switch {
 		case strings.HasPrefix(line, "# "):
@@ -144,10 +214,162 @@ func parseCanonical(markdown string) []metricChunk {
 		case strings.HasPrefix(strings.ToLower(line), "range:") && current.Range == "":
 			current.Range = line
 		default:
-			current.Readings = append(current.Readings, line)
+			if match := readingPattern.FindStringSubmatch(line); match != nil {
+				current.Readings = append(current.Readings, reading{
+					Line:  i + 1,
+					Text:  line,
+					Date:  match[1],
+					Value: match[2],
+					Unit:  strings.TrimSpace(match[3]),
+				})
+			} else {
+				current.Residue = append(current.Residue, line)
+			}
 		}
 	}
 	return chunks
+}
+
+// parseFilePool parses an existing metric file into a single pool. Files
+// should hold one metric, but a hand-edited file with several headings is
+// tolerated: the first chunk names the file, all readings merge into one pool.
+func parseFilePool(content string) metricChunk {
+	chunks := parseCanonical(content)
+	if len(chunks) == 0 {
+		return metricChunk{}
+	}
+	pool := chunks[0]
+	for _, extra := range chunks[1:] {
+		pool.Readings = append(pool.Readings, extra.Readings...)
+		pool.Residue = append(pool.Residue, extra.Residue...)
+		if pool.Range == "" {
+			pool.Range = extra.Range
+		}
+	}
+	return pool
+}
+
+// dominantUnit returns the first non-empty normalized unit in a pool — the
+// unit the file is established in.
+func dominantUnit(pool metricChunk) string {
+	for _, r := range pool.Readings {
+		if unit := normalizeUnit(r.Unit); unit != "" {
+			return unit
+		}
+	}
+	return ""
+}
+
+// unitConflicts reports incoming readings whose unit contradicts the target
+// file's established unit. Unitless readings never conflict (the extractor
+// sometimes drops a unit the source implied); merging never converts.
+func unitConflicts(existing string, chunk metricChunk, target string) []UnitConflict {
+	existingUnit := dominantUnit(parseFilePool(existing))
+	if existingUnit == "" {
+		return nil
+	}
+	var conflicts []UnitConflict
+	for _, r := range chunk.Readings {
+		if unit := normalizeUnit(r.Unit); unit != "" && unit != existingUnit {
+			conflicts = append(conflicts, UnitConflict{
+				Metric:       chunk.Metric,
+				Line:         r.Line,
+				Text:         r.Text,
+				Unit:         r.Unit,
+				ExistingUnit: existingUnit,
+				Target:       target,
+			})
+		}
+	}
+	return conflicts
+}
+
+// mergeCanonical merges an incoming chunk into an existing file's content and
+// returns the full new file: existing heading and range win, readings are
+// united, stable-sorted by ISO date (existing before incoming on ties), and
+// semantic duplicates (same date, numerically equal value, compatible unit)
+// collapse to the existing representation. Residue lines survive at the end.
+// The merge is idempotent: re-ingesting the same document changes nothing.
+func mergeCanonical(existing string, incoming metricChunk) string {
+	pool := parseFilePool(existing)
+	if pool.Metric == "" {
+		pool.Metric = incoming.Metric
+	}
+	if pool.Range == "" {
+		pool.Range = incoming.Range
+	}
+
+	for _, candidate := range incoming.Readings {
+		duplicate := false
+		for _, kept := range pool.Readings {
+			if sameReading(kept, candidate) {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			pool.Readings = append(pool.Readings, candidate)
+		}
+	}
+	sort.SliceStable(pool.Readings, func(i, j int) bool {
+		return pool.Readings[i].Date < pool.Readings[j].Date // ISO dates sort lexicographically
+	})
+
+	for _, line := range incoming.Residue {
+		if !containsString(pool.Residue, line) {
+			pool.Residue = append(pool.Residue, line)
+		}
+	}
+
+	var sb strings.Builder
+	sb.WriteString("# " + pool.Metric + "\n")
+	if pool.Range != "" {
+		sb.WriteString(pool.Range + "\n")
+	}
+	for _, r := range pool.Readings {
+		sb.WriteString(r.Text + "\n")
+	}
+	for _, line := range pool.Residue {
+		sb.WriteString(line + "\n")
+	}
+	return sb.String()
+}
+
+// sameReading reports whether two readings are semantic duplicates: same
+// date, numerically equal value (74 == 74.0), and compatible units (equal, or
+// one side unitless).
+func sameReading(a, b reading) bool {
+	if a.Date != b.Date {
+		return false
+	}
+	av, aerr := parseValue(a.Value)
+	bv, berr := parseValue(b.Value)
+	if aerr != nil || berr != nil || av != bv {
+		return false
+	}
+	au, bu := normalizeUnit(a.Unit), normalizeUnit(b.Unit)
+	return au == bu || au == "" || bu == ""
+}
+
+func parseValue(value string) (float64, error) {
+	return strconv.ParseFloat(strings.ReplaceAll(value, ",", ""), 64)
+}
+
+func containsString(list []string, s string) bool {
+	for _, item := range list {
+		if item == s {
+			return true
+		}
+	}
+	return false
+}
+
+func readFileIfExists(path string) string {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return string(content)
 }
 
 // metricSlug canonicalizes a metric name into a document ID. Identity is
@@ -163,40 +385,24 @@ func metricSlug(metric string) string {
 	return slug
 }
 
+// uniqueDocID returns id if no document with that ID exists, otherwise the
+// first free numbered variant (id_2, id_3, ...).
+func uniqueDocID(dir, id string) string {
+	if _, err := os.Stat(filepath.Join(dir, id+".md")); err != nil {
+		return id
+	}
+	for n := 2; ; n++ {
+		candidate := fmt.Sprintf("%s_%d", id, n)
+		if _, err := os.Stat(filepath.Join(dir, candidate+".md")); err != nil {
+			return candidate
+		}
+	}
+}
+
 var slugPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
 
 func validDocIDString(id string) bool {
 	return slugPattern.MatchString(id)
-}
-
-// appendChunk writes a metric chunk to its file: full section (heading,
-// range, readings) when creating, readings only when appending.
-func appendChunk(path string, chunk metricChunk) error {
-	if len(chunk.Readings) == 0 && chunk.Range == "" {
-		return nil
-	}
-
-	_, statErr := os.Stat(path)
-	exists := statErr == nil
-
-	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	var sb strings.Builder
-	if !exists {
-		sb.WriteString("# " + chunk.Metric + "\n")
-		if chunk.Range != "" {
-			sb.WriteString(chunk.Range + "\n")
-		}
-	}
-	for _, reading := range chunk.Readings {
-		sb.WriteString(reading + "\n")
-	}
-	_, err = file.WriteString(sb.String())
-	return err
 }
 
 // archiveRaw stores the untouched upload under DATA_DIR/raw for provenance,

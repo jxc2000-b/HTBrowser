@@ -2,11 +2,13 @@ import { useEffect, useRef, useState, type ChangeEvent } from 'react';
 import {
   fetchDocs,
   ingestDocument,
+  IngestConflictError,
   streamGeneratedPage,
   uploadDocument,
   validatePage,
   type DocInfo,
   type StreamHandle,
+  type UnitConflict,
   type UploadReview as UploadReviewData,
   type ValidationResult,
 } from './api';
@@ -32,6 +34,7 @@ function App() {
   const [docList, setDocList] = useState<DocInfo[]>([]);
   const [review, setReview] = useState<UploadReviewData | null>(null);
   const [reviewBusy, setReviewBusy] = useState(false);
+  const [unitConflicts, setUnitConflicts] = useState<UnitConflict[]>([]);
 
   const streamRef = useRef<StreamHandle | null>(null);
   const bufferRef = useRef({ html: '', chunks: 0 });
@@ -122,6 +125,7 @@ function App() {
     setStatus('validating');
     try {
       const content = await file.text();
+      setUnitConflicts([]);
       setReview(await uploadDocument(file.name, content));
       setStatus('idle');
     } catch (uploadError) {
@@ -130,19 +134,26 @@ function App() {
     }
   };
 
-  const approveReview = async (extracted: string) => {
+  const approveReview = async (extracted: string, assignments: Record<string, string>) => {
     setReviewBusy(true);
     setError('');
     try {
-      await ingestDocument(extracted);
+      await ingestDocument(extracted, assignments);
       setReview(null);
+      setUnitConflicts([]);
       // New metric files exist now: refresh the nav and regenerate home.
       fetchDocs()
         .then(setDocList)
         .catch(() => {});
       generate('');
     } catch (ingestError) {
-      setError(ingestError instanceof Error ? ingestError.message : 'Saving failed.');
+      if (ingestError instanceof IngestConflictError) {
+        // Nothing was written: kick back to the review screen with the
+        // conflicting units underlined so the user can fix them in place.
+        setUnitConflicts(ingestError.conflicts);
+      } else {
+        setError(ingestError instanceof Error ? ingestError.message : 'Saving failed.');
+      }
     } finally {
       setReviewBusy(false);
     }
@@ -197,7 +208,7 @@ function App() {
     <main className="app-shell">
       <section className="toolbar">
         <div>
-          <p className="eyebrow">Health Dash</p>
+          <p className="eyebrow">Dashboard</p>
           <h1>{doc ? `${doc}.md` : 'Home'}</h1>
         </div>
 
@@ -297,9 +308,14 @@ function App() {
       {review ? (
         <UploadReview
           review={review}
+          registry={docList.map((info) => info.id)}
+          unitConflicts={unitConflicts}
           busy={reviewBusy}
-          onApprove={(extracted) => void approveReview(extracted)}
-          onCancel={() => setReview(null)}
+          onApprove={(extracted, assignments) => void approveReview(extracted, assignments)}
+          onCancel={() => {
+            setReview(null);
+            setUnitConflicts([]);
+          }}
         />
       ) : (
         <section className="preview-shell">
