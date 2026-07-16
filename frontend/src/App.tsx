@@ -78,12 +78,14 @@ function App() {
         onDone: () => {
           flushBuffer();
           streamRef.current = null;
-          if (targetDoc) {
+          if (targetDoc && targetDoc !== 'overview') {
             // Repair passes are disabled: documents are user-verified at
             // ingestion, so failures are just highlighted, not regenerated.
             void runValidation(targetDoc, false);
           } else {
-            setStatus('done'); // homepage shows no data values, nothing to validate
+            // Homepage and overview are rendered programmatically from the
+            // files — there is no LLM output to validate.
+            setStatus('done');
           }
         },
       },
@@ -209,7 +211,7 @@ function App() {
       <section className="toolbar">
         <div>
           <p className="eyebrow">Dashboard</p>
-          <h1>{doc ? `${doc}.md` : 'Home'}</h1>
+          <h1>{doc === 'overview' ? 'Overview' : doc ? `${doc}.md` : 'Home'}</h1>
         </div>
 
         <div className="actions">
@@ -255,6 +257,13 @@ function App() {
             onClick={() => navigate('/')}
           >
             Home
+          </button>
+          <button
+            type="button"
+            className={`doc-nav-link${doc === 'overview' ? ' doc-nav-active' : ''}`}
+            onClick={() => navigate('/doc/overview')}
+          >
+            Overview
           </button>
           {docList.map((info) => (
             <button

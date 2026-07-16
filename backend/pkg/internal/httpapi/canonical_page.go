@@ -35,42 +35,10 @@ func canonicalPage(info docs.DocInfo, markdown string) (string, bool) {
 	if !isCanonical(markdown) {
 		return "", false
 	}
-	chunks := parseCanonical(markdown)
 
 	var charts strings.Builder
-	for _, chunk := range chunks {
-		// Same rule as the generation prompt: a metric needs two or more
-		// readings to chart; single readings are omitted entirely.
-		if len(chunk.Readings) < 2 {
-			continue
-		}
-		unit := ""
-		for _, r := range chunk.Readings {
-			if r.Unit != "" {
-				unit = r.Unit
-				break
-			}
-		}
-		labels := make([]string, len(chunk.Readings))
-		values := make([]string, len(chunk.Readings))
-		for i, r := range chunk.Readings {
-			labels[i] = r.Date
-			// Raw value tokens go into the JSON verbatim (5.10 stays 5.10) so
-			// the validator sees the document's own formatting.
-			values[i] = strings.ReplaceAll(r.Value, ",", "")
-		}
-		labelsJSON, _ := json.Marshal(labels)
-		spec := fmt.Sprintf(`{"type":"line","title":%s,"unit":%s,"labels":%s,"values":[%s]}`,
-			mustJSON(chunk.Metric), mustJSON(unit), labelsJSON, strings.Join(values, ","))
-
-		charts.WriteString(fmt.Sprintf(`
-    <section class="w-full bg-white border border-slate-200 rounded-lg p-4 mb-6">
-      <h2 class="text-sm font-semibold text-slate-700 mb-2">%s%s</h2>
-      <div class="h-64 w-full"><canvas data-chart='%s'></canvas></div>
-    </section>`,
-			html.EscapeString(chunk.Metric),
-			unitSuffix(unit),
-			escapeSingleQuotedAttr(spec)))
+	for _, chunk := range parseCanonical(markdown) {
+		charts.WriteString(chartSection(chunk, ""))
 	}
 
 	body := charts.String()
@@ -78,7 +46,85 @@ func canonicalPage(info docs.DocInfo, markdown string) (string, bool) {
 		body = `<p class="text-slate-500">No metric in this document has enough readings to chart yet.</p>`
 	}
 
-	page := fmt.Sprintf(`<html>
+	subtitle := fmt.Sprintf("source: %s.md · rendered without AI, values are read directly from the file", html.EscapeString(info.ID))
+	return pageShell(info.Title, subtitle, body), true
+}
+
+// overviewPage renders every chartable metric across all canonical documents
+// in one page. Each chart title links to the metric's own page. Non-canonical
+// (legacy) documents are skipped — their values are not machine-readable.
+func overviewPage(registry docs.Registry, infos []docs.DocInfo) string {
+	var charts strings.Builder
+	skipped := 0
+	for _, info := range infos {
+		markdown, err := registry.Read(info.ID)
+		if err != nil || !isCanonical(markdown) {
+			skipped++
+			continue
+		}
+		for _, chunk := range parseCanonical(markdown) {
+			charts.WriteString(chartSection(chunk, "/doc/"+info.ID))
+		}
+	}
+
+	body := charts.String()
+	if body == "" {
+		body = `<p class="text-slate-500">No metric has enough readings to chart yet — upload some data first.</p>`
+	}
+	if skipped > 0 {
+		body += fmt.Sprintf(`
+    <p class="text-xs text-slate-400">%d document%s not in the canonical measurement format %s omitted.</p>`,
+			skipped, plural(skipped), pluralWas(skipped))
+	}
+
+	subtitle := "every metric across all documents · rendered without AI, values are read directly from the files"
+	return pageShell("Overview", subtitle, body)
+}
+
+// chartSection renders one metric's chart card. Metrics with fewer than two
+// readings render nothing — same rule as the generation prompt. titleHref,
+// when non-empty, wraps the card title in a link.
+func chartSection(chunk metricChunk, titleHref string) string {
+	if len(chunk.Readings) < 2 {
+		return ""
+	}
+	unit := ""
+	for _, r := range chunk.Readings {
+		if r.Unit != "" {
+			unit = r.Unit
+			break
+		}
+	}
+	labels := make([]string, len(chunk.Readings))
+	values := make([]string, len(chunk.Readings))
+	for i, r := range chunk.Readings {
+		labels[i] = r.Date
+		// Raw value tokens go into the JSON verbatim (5.10 stays 5.10) so
+		// the validator sees the document's own formatting.
+		values[i] = strings.ReplaceAll(r.Value, ",", "")
+	}
+	labelsJSON, _ := json.Marshal(labels)
+	spec := fmt.Sprintf(`{"type":"line","title":%s,"unit":%s,"labels":%s,"values":[%s]}`,
+		mustJSON(chunk.Metric), mustJSON(unit), labelsJSON, strings.Join(values, ","))
+
+	title := html.EscapeString(chunk.Metric) + unitSuffix(unit)
+	if titleHref != "" {
+		title = fmt.Sprintf(`<a href="%s" class="hover:underline">%s</a>`, html.EscapeString(titleHref), title)
+	}
+
+	return fmt.Sprintf(`
+    <section class="w-full bg-white border border-slate-200 rounded-lg p-4 mb-6">
+      <h2 class="text-sm font-semibold text-slate-700 mb-2">%s</h2>
+      <div class="h-64 w-full"><canvas data-chart='%s'></canvas></div>
+    </section>`,
+		title,
+		escapeSingleQuotedAttr(spec))
+}
+
+// pageShell wraps page content in the shared document skeleton: title,
+// subtitle, home link, light color scheme, Tailwind-styled body.
+func pageShell(title, subtitle, body string) string {
+	return fmt.Sprintf(`<html>
 <head>
   <title>%s</title>
   <meta name="color-scheme" content="light">
@@ -88,7 +134,7 @@ func canonicalPage(info docs.DocInfo, markdown string) (string, bool) {
     <header class="mb-6 flex items-baseline justify-between gap-4">
       <div>
         <h1 class="text-xl font-bold">%s</h1>
-        <p class="text-xs text-slate-500">source: %s.md · rendered without AI, values are read directly from the file</p>
+        <p class="text-xs text-slate-500">%s</p>
       </div>
       <a href="/" class="text-sm font-semibold text-blue-700 hover:underline">Home</a>
     </header>
@@ -96,12 +142,24 @@ func canonicalPage(info docs.DocInfo, markdown string) (string, bool) {
   </main>
 </body>
 </html>`,
-		html.EscapeString(info.Title),
-		html.EscapeString(info.Title),
-		html.EscapeString(info.ID),
+		html.EscapeString(title),
+		html.EscapeString(title),
+		subtitle,
 		body)
+}
 
-	return page, true
+func plural(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
+}
+
+func pluralWas(n int) string {
+	if n == 1 {
+		return "was"
+	}
+	return "were"
 }
 
 // homePage renders the homepage programmatically from the registry: a
@@ -128,6 +186,12 @@ func homePage(registry []docs.DocInfo) string {
       <li class="text-slate-500">No documents yet — upload one to get started.</li>`)
 	}
 
+	overviewLink := ""
+	if len(registry) > 0 {
+		overviewLink = `
+    <p class="mb-4 text-sm"><a href="/doc/overview" class="font-semibold text-blue-700 hover:underline">Overview</a><span class="text-slate-500"> — all metrics on one page</span></p>`
+	}
+
 	return fmt.Sprintf(`<html>
 <head>
   <title>Home</title>
@@ -135,13 +199,13 @@ func homePage(registry []docs.DocInfo) string {
 </head>
 <body class="bg-slate-50 text-slate-900">
   <main class="max-w-2xl mx-auto px-6 py-10">
-    <h1 class="text-xl font-bold mb-4">Documents</h1>
+    <h1 class="text-xl font-bold mb-4">Documents</h1>%s
     <ul class="space-y-1 text-sm leading-6">%s
     </ul>
     <p class="mt-8 text-xs text-slate-400">This tool only visualizes data you provided. It is not medical advice; check values against your original documents.</p>
   </main>
 </body>
-</html>`, rows.String())
+</html>`, overviewLink, rows.String())
 }
 
 func unitSuffix(unit string) string {

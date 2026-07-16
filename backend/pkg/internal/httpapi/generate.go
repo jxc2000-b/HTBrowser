@@ -77,6 +77,19 @@ func (h Handler) generate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// "overview" is a reserved page: every chartable metric across all
+	// canonical documents, rendered programmatically. It shadows any real
+	// document that happens to be named overview.md.
+	if req.Doc == "overview" {
+		registry, err := h.Docs.List()
+		if err != nil {
+			http.Error(w, "failed to list documents: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		streamCached(w, overviewPage(h.Docs, registry))
+		return
+	}
+
 	markdown, err := h.Docs.Read(req.Doc)
 	if err != nil {
 		http.Error(w, "unknown document: "+req.Doc, http.StatusNotFound)
